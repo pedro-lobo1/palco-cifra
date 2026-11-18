@@ -5,6 +5,9 @@
 
 /* ---------- Utilidades / armazenamento ---------- */
 const STORE = 'palco.v1';
+const DRIVE_CLIENT_ID = '1042109351796-l3orq68h382me7sg8k6bcg7989ji4a4k.apps.googleusercontent.com';
+const DRIVE_FILE = 'palco-cifra-backup.json';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const nz = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -599,14 +602,124 @@ function settingsHTML() {
     <button class="btn wide ghost" data-a="closeSheet">Fechar</button>`;
 }
 
+/* ---------- Sincronização com Google Drive ---------- */
+let gToken = null, gTokenExp = 0, gisLoading = null;
+const driveClientId = () => DRIVE_CLIENT_ID || localStorage.getItem('palco.driveId') || '';
+
+function loadGIS() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (gisLoading) return gisLoading;
+  gisLoading = new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://accounts.google.com/gsi/client';
+    sc.async = true;
+    sc.onload = () => res();
+    sc.onerror = () => { gisLoading = null; rej(new Error('Sem conexão com o Google')); };
+    document.head.appendChild(sc);
+  });
+  return gisLoading;
+}
+
+async function driveToken() {
+  if (gToken && Date.now() < gTokenExp - 30000) return gToken;
+  const cid = driveClientId().trim();
+  if (!cid) throw new Error('Informe o Client ID do Google Drive');
+  await loadGIS();
+  return new Promise((res, rej) => {
+    const tc = google.accounts.oauth2.initTokenClient({
+      client_id: cid,
+      scope: DRIVE_SCOPE,
+      callback: r => {
+        if (r.error || !r.access_token) return rej(new Error(r.error_description || r.error || 'Login cancelado'));
+        gToken = r.access_token;
+        gTokenExp = Date.now() + (Number(r.expires_in) || 3600) * 1000;
+        res(gToken);
+      }
+    });
+    tc.requestAccessToken({ prompt: gToken ? '' : 'consent' });
+  });
+}
+
+async function driveFetch(url, opt = {}) {
+  const tk = await driveToken();
+  const r = await fetch(url, { ...opt, headers: { Authorization: 'Bearer ' + tk, ...(opt.headers || {}) } });
+  if (r.status === 401) { gToken = null; throw new Error('Sessão expirada, tente novamente'); }
+  if (!r.ok) throw new Error('Erro Google Drive (' + r.status + ')');
+  return r;
+}
+
+async function driveFind() {
+  const q = encodeURIComponent(`name='${DRIVE_FILE}' and trashed=false`);
+  const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,modifiedTime)&spaces=drive`);
+  const d = await r.json();
+  return d.files?.[0] || null;
+}
+
+function mergeBackup(d) {
+  if (!d || !Array.isArray(d.songs)) throw new Error('formato');
+  for (const s of d.songs) { const i = S.songs.findIndex(x => x.id === s.id); if (i >= 0) S.songs[i] = s; else S.songs.push(s); }
+  for (const l of d.setlists || []) { const i = S.setlists.findIndex(x => x.id === l.id); if (i >= 0) S.setlists[i] = l; else S.setlists.push(l); }
+  save();
+}
+
+async function drivePush() {
+  toast('Enviando para o Drive…');
+  const payload = JSON.stringify({ app: 'palco', v: 1, updatedAt: new Date().toISOString(), songs: S.songs, setlists: S.setlists });
+  const existing = await driveFind();
+  if (existing) {
+    await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: payload
+    });
+  } else {
+    const b = 'palco_' + Date.now();
+    const meta = JSON.stringify({ name: DRIVE_FILE, mimeType: 'application/json' });
+    const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${b}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${b}--`;
+    await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${b}` }, body
+    });
+  }
+  localStorage.setItem('palco.driveSync', new Date().toLocaleString('pt-BR'));
+  toast(`Salvo no Drive ✓ (${S.songs.length} músicas)`);
+  closeSheet();
+}
+
+async function drivePull() {
+  toast('Buscando no Drive…');
+  const existing = await driveFind();
+  if (!existing) { toast('Nenhum backup encontrado no Drive'); return; }
+  const r = await driveFetch(`https://www.googleapis.com/drive/v3/files/${existing.id}?alt=media`);
+  const d = await r.json();
+  mergeBackup(d);
+  localStorage.setItem('palco.driveSync', new Date().toLocaleString('pt-BR'));
+  toast(`Sincronizado ✓ (${d.songs.length} músicas)`);
+  closeSheet(); render();
+}
+
+function menuHTML() {
+  const cid = driveClientId();
+  const last = localStorage.getItem('palco.driveSync');
+  return `<h3>Menu</h3>
+    <div class="hint" style="margin-bottom:6px">☁️ <b>Google Drive</b>${last ? ` · último sync: ${esc(last)}` : ''}</div>
+    ${DRIVE_CLIENT_ID ? '' : `<input id="drive-cid" placeholder="Cole seu Google Client ID (.apps.googleusercontent.com)" value="${esc(cid)}" style="margin-bottom:8px;font-size:13px">`}
+    <button class="btn wide primary" data-a="drivePush">☁️ Enviar para o Google Drive</button>
+    <button class="btn wide" data-a="drivePull">☁️ Baixar do Google Drive</button>
+    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+    <button class="btn wide" data-a="export">⬇️ Exportar backup (arquivo .json)</button>
+    <button class="btn wide" data-a="import">⬆️ Importar backup (arquivo .json)</button>
+    <p class="hint">As cifras ficam salvas offline no aparelho. Use o Google Drive ou o arquivo .json para sincronizar entre PC e celular.</p>
+    <button class="btn wide ghost" data-a="closeSheet">Fechar</button>`;
+}
+
 /* ---------- Ações (cliques) ---------- */
 const actions = {
   tab: d => { S.tab = d.v; save(); render(); },
-  menu: () => openSheet(`<h3>Menu</h3>
-    <button class="btn wide" data-a="export">⬇️ Exportar backup (todas as músicas)</button>
-    <button class="btn wide" data-a="import">⬆️ Importar backup</button>
-    <p class="hint">Tudo fica salvo só neste aparelho, sem internet e sem anúncios. Faça backup de vez em quando e use o arquivo para passar as músicas para outro celular.</p>
-    <button class="btn wide ghost" data-a="closeSheet">Fechar</button>`),
+  menu: () => {
+    openSheet(menuHTML());
+    const inp = document.getElementById('drive-cid');
+    if (inp) inp.addEventListener('input', e => localStorage.setItem('palco.driveId', e.target.value.trim()));
+  },
+  drivePush: () => drivePush().catch(e => toast(e.message || 'Erro ao enviar')),
+  drivePull: () => drivePull().catch(e => toast(e.message || 'Erro ao baixar')),
   closeSheet: () => closeSheet(),
   back: () => back(),
   hideIos: () => { localStorage.setItem('palco.hideIos', '1'); render(); },
@@ -731,10 +844,8 @@ const actions = {
       r.onload = () => {
         try {
           const d = JSON.parse(r.result);
-          if (!Array.isArray(d.songs)) throw new Error('formato');
-          for (const s of d.songs) { const i = S.songs.findIndex(x => x.id === s.id); if (i >= 0) S.songs[i] = s; else S.songs.push(s); }
-          for (const l of d.setlists || []) { const i = S.setlists.findIndex(x => x.id === l.id); if (i >= 0) S.setlists[i] = l; else S.setlists.push(l); }
-          save(); toast(`Importado: ${d.songs.length} música(s)`); closeSheet(); render();
+          mergeBackup(d);
+          toast(`Importado: ${d.songs.length} música(s)`); closeSheet(); render();
         } catch (e) { toast('Arquivo inválido'); }
       };
       r.readAsText(f);

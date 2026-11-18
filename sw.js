@@ -1,5 +1,5 @@
 ﻿// Service worker: deixa o app funcionando 100% offline
-const CACHE = 'palco-v10';
+const CACHE = 'palco-v11';
 const FILES = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -12,7 +12,7 @@ self.addEventListener('activate', e => {
 });
 // Responde do cache na hora e atualiza em segundo plano quando houver internet
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
+  if (e.request.method !== 'GET' || !e.request.url.startsWith(self.location.origin)) return;
   e.respondWith(
     caches.open(CACHE).then(async c => {
       const hit = await c.match(e.request, { ignoreSearch: true });

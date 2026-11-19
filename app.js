@@ -660,9 +660,10 @@ async function driveFind() {
 
 function mergeBackup(d) {
   if (!d || !Array.isArray(d.songs)) throw new Error('formato');
-  for (const s of d.songs) { const i = S.songs.findIndex(x => x.id === s.id); if (i >= 0) S.songs[i] = s; else S.songs.push(s); }
-  for (const l of d.setlists || []) { const i = S.setlists.findIndex(x => x.id === l.id); if (i >= 0) S.setlists[i] = l; else S.setlists.push(l); }
+  for (const s of d.songs) { const i = S.songs.findIndex(x => String(x.id) === String(s.id)); if (i >= 0) S.songs[i] = s; else S.songs.push(s); }
+  for (const l of d.setlists || []) { const i = S.setlists.findIndex(x => String(x.id) === String(l.id)); if (i >= 0) S.setlists[i] = l; else S.setlists.push(l); }
   save();
+  supaLoad(false);
 }
 
 async function drivePush() {
@@ -702,9 +703,11 @@ function menuHTML() {
   const cid = driveClientId();
   const last = localStorage.getItem('palco.driveSync');
   return `<h3>Menu</h3>
+    <button class="btn wide primary" data-a="supaSync">🔄 Sincronizar com Supabase</button>
+    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
     <div class="hint" style="margin-bottom:6px">☁️ <b>Google Drive</b>${last ? ` · último sync: ${esc(last)}` : ''}</div>
     ${DRIVE_CLIENT_ID ? '' : `<input id="drive-cid" placeholder="Cole seu Google Client ID (.apps.googleusercontent.com)" value="${esc(cid)}" style="margin-bottom:8px;font-size:13px">`}
-    <button class="btn wide primary" data-a="drivePush">☁️ Enviar para o Google Drive</button>
+    <button class="btn wide" data-a="drivePush">☁️ Enviar para o Google Drive</button>
     <button class="btn wide" data-a="drivePull">☁️ Baixar do Google Drive</button>
     <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
     <button class="btn wide" data-a="export">⬇️ Exportar backup (arquivo .json)</button>
@@ -735,20 +738,26 @@ const fromSupaRow = r => ({
   content: r.conteudo || ''
 });
 
-async function supaLoad() {
-  if (!db) return;
+async function supaLoad(manual) {
+  if (!db) { if (manual) toast('Supabase não conectado'); return; }
+  if (manual) toast('Sincronizando…');
   try {
     const { data, error } = await db.from('Cifras').select('id,titulo,artista,tom,bpm,notes,transpose,conteudo').order('titulo', { ascending: true });
-    if (error || !Array.isArray(data)) return;
+    if (error || !Array.isArray(data)) { if (manual) toast('Erro ao acessar Supabase'); return; }
     const remote = data.map(fromSupaRow);
     const localOnly = S.songs.filter(s => !isSupaId(s.id) && !(s.title === 'Música de Exemplo' && s.artist === 'Palco'));
     S.songs = [...remote, ...localOnly];
     save();
     if (view.name === 'home') render();
+    let sent = 0;
     for (const s of localOnly) {
-      if (!remote.some(r => nz(r.title) === nz(s.title) && nz(r.artist) === nz(s.artist))) await supaSave(s);
+      if (!remote.some(r => nz(r.title) === nz(s.title) && nz(r.artist) === nz(s.artist))) {
+        await supaSave(s);
+        sent++;
+      }
     }
-  } catch (e) { /* offline: mantém cache local */ }
+    if (manual) { toast(`Supabase ✓ (${S.songs.length} cifras${sent ? `, ${sent} enviada(s)` : ''})`); closeSheet(); }
+  } catch (e) { if (manual) toast('Sem conexão com o Supabase'); }
 }
 
 async function supaSave(s) {
@@ -785,6 +794,7 @@ const actions = {
   },
   drivePush: () => drivePush().catch(e => toast(e.message || 'Erro ao enviar')),
   drivePull: () => drivePull().catch(e => toast(e.message || 'Erro ao baixar')),
+  supaSync: () => supaLoad(true),
   closeSheet: () => closeSheet(),
   back: () => back(),
   hideIos: () => { localStorage.setItem('palco.hideIos', '1'); render(); },

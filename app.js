@@ -29,8 +29,8 @@ function load() {
   return d;
 }
 function save() { try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) { toast('Erro ao salvar'); } }
-const byId = id => S.songs.find(s => s.id === id);
-const setById = id => S.setlists.find(s => s.id === id);
+const byId = id => S.songs.find(s => String(s.id) === String(id));
+const setById = id => S.setlists.find(s => String(s.id) === String(id));
 
 function demoSong() {
   return {
@@ -713,6 +713,65 @@ function menuHTML() {
     <button class="btn wide ghost" data-a="closeSheet">Fechar</button>`;
 }
 
+/* ---------- Sincronização com Supabase (tabela "Cifras") ---------- */
+const isSupaId = id => /^\d+$/.test(String(id || ''));
+const toSupaRow = s => ({
+  titulo: s.title || '',
+  artista: s.artist || '',
+  tom: s.key || '',
+  bpm: s.bpm || '',
+  notes: s.notes || '',
+  transpose: s.transpose || 0,
+  conteudo: s.content || ''
+});
+const fromSupaRow = r => ({
+  id: String(r.id),
+  title: r.titulo || '',
+  artist: r.artista || '',
+  key: r.tom || '',
+  bpm: r.bpm || '',
+  notes: r.notes || '',
+  transpose: r.transpose || 0,
+  content: r.conteudo || ''
+});
+
+async function supaLoad() {
+  if (!db) return;
+  try {
+    const { data, error } = await db.from('Cifras').select('id,titulo,artista,tom,bpm,notes,transpose,conteudo').order('titulo', { ascending: true });
+    if (error || !Array.isArray(data)) return;
+    const remote = data.map(fromSupaRow);
+    const localOnly = S.songs.filter(s => !isSupaId(s.id) && !(remote.length && s.title === 'Música de Exemplo' && s.artist === 'Palco'));
+    S.songs = [...remote, ...localOnly];
+    save();
+    if (view.name === 'home') render();
+  } catch (e) { /* offline: mantém cache local */ }
+}
+
+async function supaSave(s) {
+  if (!db || !s) return;
+  try {
+    if (isSupaId(s.id)) {
+      await db.from('Cifras').update(toSupaRow(s)).eq('id', Number(s.id));
+    } else {
+      const oldId = s.id;
+      const { data, error } = await db.from('Cifras').insert(toSupaRow(s)).select('id').single();
+      if (!error && data?.id != null) {
+        s.id = String(data.id);
+        S.setlists.forEach(l => { l.songs = l.songs.map(x => x === oldId ? s.id : x); });
+        if (view.list) view.list = view.list.map(x => x === oldId ? s.id : x);
+        save();
+        if (view.name === 'home') render();
+      }
+    }
+  } catch (e) { /* offline */ }
+}
+
+async function supaDelete(id) {
+  if (!db || !isSupaId(id)) return;
+  try { await db.from('Cifras').delete().eq('id', Number(id)); } catch (e) { /* offline */ }
+}
+
 /* ---------- Ações (cliques) ---------- */
 const actions = {
   tab: d => { S.tab = d.v; save(); render(); },
@@ -758,6 +817,7 @@ const actions = {
     if (!s) { s = { id: uid(), transpose: 0 }; S.songs.push(s); }
     Object.assign(s, { title, artist: f('f-artist').trim(), key, bpm: f('f-bpm').trim(), notes: f('f-notes').trim(), content });
     save(); toast('Salvo ✓'); back();
+    supaSave(s);
   },
   delSong: d => {
     const s = byId(d.id);
@@ -765,6 +825,7 @@ const actions = {
     S.songs = S.songs.filter(x => x.id !== d.id);
     S.setlists.forEach(l => { l.songs = l.songs.filter(id => id !== d.id); });
     save(); toast('Excluída'); back();
+    supaDelete(d.id);
   },
 
   newSet: () => {
@@ -804,7 +865,7 @@ const actions = {
   next: () => setSong(view.i + 1),
   trUp: () => transpose(1),
   trDown: () => transpose(-1),
-  trReset: () => { const s = byId(view.list[view.i]); s.transpose = 0; save(); renderStage(true); toast('Tom original'); },
+  trReset: () => { const s = byId(view.list[view.i]); s.transpose = 0; save(); renderStage(true); toast('Tom original'); supaSave(s); },
   fontUp: () => { S.prefs.font = Math.min(48, S.prefs.font + 2); save(); renderStage(true); },
   fontDown: () => { S.prefs.font = Math.max(12, S.prefs.font - 2); save(); renderStage(true); },
   scroll: () => (scrollRAF ? stopScroll() : startScroll()),
@@ -865,7 +926,7 @@ function moveInSet(i, dir) {
 function transpose(d) {
   const s = byId(view.list[view.i]);
   s.transpose = (((s.transpose || 0) + d + 17) % 12) - 5; // mantém entre -5 e +6
-  save(); renderStage(true);
+  save(); renderStage(true); supaSave(s);
   if (s.key) toast('Tom: ' + shownKey(s));
 }
 
@@ -897,6 +958,7 @@ document.addEventListener('keydown', e => {
 /* ---------- Início ---------- */
 history.replaceState({ d: 0 }, '');
 render();
+supaLoad();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

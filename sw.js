@@ -1,5 +1,5 @@
 ﻿// Service worker: deixa o app funcionando 100% offline
-const CACHE = 'palco-v11';
+const CACHE = 'palco-v12';
 const FILES = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

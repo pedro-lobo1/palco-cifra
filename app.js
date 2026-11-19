@@ -741,10 +741,13 @@ async function supaLoad() {
     const { data, error } = await db.from('Cifras').select('id,titulo,artista,tom,bpm,notes,transpose,conteudo').order('titulo', { ascending: true });
     if (error || !Array.isArray(data)) return;
     const remote = data.map(fromSupaRow);
-    const localOnly = S.songs.filter(s => !isSupaId(s.id) && !(remote.length && s.title === 'Música de Exemplo' && s.artist === 'Palco'));
+    const localOnly = S.songs.filter(s => !isSupaId(s.id) && !(s.title === 'Música de Exemplo' && s.artist === 'Palco'));
     S.songs = [...remote, ...localOnly];
     save();
     if (view.name === 'home') render();
+    for (const s of localOnly) {
+      if (!remote.some(r => nz(r.title) === nz(s.title) && nz(r.artist) === nz(s.artist))) await supaSave(s);
+    }
   } catch (e) { /* offline: mantém cache local */ }
 }
 
